@@ -131,7 +131,7 @@ object SerTest {
     Logger.getRootLogger.setLevel(Level.FATAL)
 
     val slices = 4
-    val n = 600 * slices
+    val n = 100 * slices
     val random =new Random()
     val num=slices//random.nextLong()
     val rawData = spark.parallelize(0 to n-1, slices).map(x =>
@@ -178,8 +178,7 @@ object SerTest {
 
   class KeyValueChunk(size: Int = 4296) extends ByteArrayOutputStream(size) {
 
-    def join(key:Long,value:Double): ArrayBuffer[(Long,Double)] = {
-      val res = new ArrayBuffer[(Long, Double)]
+ /*   def join(key:Long,value:Double): Array[(Long,Double)] = {
       var i = 0
       var offset:Int = 0
       val length = WritableComparator.readLong(buf,offset)
@@ -189,14 +188,14 @@ object SerTest {
         currentKey = WritableComparator.readLong(buf, offset)
         offset += 8
         val valueLength=WritableComparator.readLong(buf, offset)
-
         if (currentKey == key) {
           var j= 0
           var currentValue:Long=0
+          val res = new Array[(Long, Double)](valueLength.toInt)
           while ((j<valueLength)&&(offset <= count)){
             offset += 8
             currentValue = WritableComparator.readLong(buf, offset)
-            res += ((currentValue,value/valueLength))
+            res(j)=((currentValue,value/valueLength))
             j += 1
           }
           return res
@@ -206,15 +205,43 @@ object SerTest {
       }
       null
     }
+    */
+       var offset:Int = 0
+
+       def join(key:Long,value:Double): Array[(Long,Double)] = {
+         var currentKey:Long=0
+         if((offset <= count)) {
+           currentKey = WritableComparator.readLong(buf, offset)
+           offset += 8
+           val valueLength=WritableComparator.readLong(buf, offset)
+           if (currentKey == key) {
+             var j= 0
+             var currentValue:Long=0
+             val res = new Array[(Long, Double)](valueLength.toInt)
+             while ((j<valueLength)&&(offset <= count)){
+               offset += 8
+               currentValue = WritableComparator.readLong(buf, offset)
+               res(j)=((currentValue,value/valueLength))
+               j += 1
+             }
+             offset+=8
+             return res
+           }
+         }
+         null
+     }
+
   }
 
     def manuallyPageRank(lines: RDD[String], level: StorageLevel) {
 
-      val iters = 1
+      val iters = 2
       val links = lines.map { s =>
         val parts = s.split("\\s+")
         (parts(0).toLong, parts(1).toLong)
-      }.groupByKey()
+      }.groupByKey().sortByKey()
+
+      //links.foreach(x=>println(x._1+":"+x._2))
 
       var ranks = links.mapValues(v => 1.0)
 
@@ -222,7 +249,7 @@ object SerTest {
         val chunk = new KeyValueChunk(42960)
         val dos = new DataOutputStream(chunk)
         val (iter1, iter2) = iter.duplicate
-        dos.writeLong(iter1.size)
+      //  dos.writeLong(iter1.size)
         iter2.foreach(x => {
           dos.writeLong(x._1)
           dos.writeLong(x._2.size)
@@ -243,6 +270,7 @@ object SerTest {
             val keyValue = r.next()
             res ++= chunkData.join(keyValue._1, keyValue._2)
           }
+          chunkData.offset=0
           res.iterator
         }
         else
@@ -250,8 +278,12 @@ object SerTest {
       }
         for (i <- 1 to iters) {
           val contribs = cachedData.zipPartitions(ranks)(zipPartitionsFunc)
-          ranks = contribs.reduceByKey(_ + _).mapValues(0.15 + 0.85 * _)
+          contribs.foreach(x=>{println(x._1+":"+x._2)
+                              println("----------------------------------")})
+          ranks = contribs.reduceByKey(_ + _).mapValues(0.15 + 0.85 * _).sortByKey()
+          //ranks.foreach(x=>println(x._1+":"+x._2))
         }
+
         ranks.collect()
         val duration = System.currentTimeMillis - startTime
         println("Duration is " + duration / 1000.0 + " seconds")
