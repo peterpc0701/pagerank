@@ -24,12 +24,57 @@ import org.apache.spark._
 
 import java.util.Random
 
+import org.apache.spark.rdd.RDD
+
 import scala.math.exp
 
 import breeze.linalg.{Vector, DenseVector}
 
+import java.io.{DataOutputStream, ByteArrayOutputStream}
 
+import org.apache.hadoop.io.WritableComparator
 
+class PointChunk(dimensions: Int,size: Int = 4196) extends ByteArrayOutputStream(size) { self =>
+
+  def getVectorValueIterator(w: Vector[Double]) = new Iterator[DenseVector[Double]] {
+    var offset = 0
+    var currentPoint=new Array[Double](dimensions)
+    var i = 0
+    var y = 0.0
+    var dotvalue = 0.0
+
+    override def hasNext = offset < self.count
+
+    override def next() = {
+      if (!hasNext) Iterator.empty.next()
+      else {
+        //read data from the chunk
+        i=0
+        while (i < dimensions) {
+          currentPoint(i)= WritableComparator.readDouble(buf, offset)
+          offset += 8
+          i += 1
+        }
+        y = WritableComparator.readDouble(buf, offset)
+        offset += 8
+        //calculate the dot value
+        i=0
+        dotvalue = 0.0
+        while (i < dimensions) {
+          dotvalue += w(i)*currentPoint(i)
+          i += 1
+        }
+        //transform to values
+        i=0
+        while (i < dimensions) {
+          currentPoint(i) *= (1 / (1 + exp(-y * dotvalue)) - 1) * y
+          i += 1
+        }
+        new DenseVector[Double](currentPoint)
+      }
+    }
+  }
+}
 /**
  * Logistic regression based classification.
  * Usage: SparkLR [slices]
@@ -43,12 +88,16 @@ import breeze.linalg.{Vector, DenseVector}
 
 object SparkLR {
   val N = 10000  // Number of data points
-  val D = 100   // Numer of dimensions
+  val D = 1000   // Numer of dimensions
   val R = 0.7  // Scaling factor
   val ITERATIONS = 5
   val rand = new Random(42)
 
   case class DataPoint(x: Vector[Double], y: Double)
+
+  // Initialize w to a random value
+  var w = DenseVector.fill(D){2 * rand.nextDouble - 1}
+  println("Initial w: " + w)
 
   def generateData = {
     def generatePoint(i: Int) = {
@@ -59,28 +108,9 @@ object SparkLR {
     Array.tabulate(N)(generatePoint)
   }
 
-  def showWarning() {
-    System.err.println(
-      """WARN: This is a naive implementation of Logistic Regression and is given as an example!
-        |Please use either org.apache.spark.mllib.classification.LogisticRegressionWithSGD or
-        |org.apache.spark.mllib.classification.LogisticRegressionWithLBFGS
-        |for more conventional use.
-      """.stripMargin)
-  }
+  def testNative(points: RDD[DataPoint]): Unit = {
 
-  def main(args: Array[String]) {
-
-    showWarning()
-
-    val sparkConf = new SparkConf().setAppName("SparkLR").setMaster("local")
-    val sc = new SparkContext(sparkConf)
-    val numSlices = if (args.length > 0) args(0).toInt else 2
-    val points = sc.parallelize(generateData, numSlices).cache()
-
-    // Initialize w to a random value
-    var w = DenseVector.fill(D){2 * rand.nextDouble - 1}
-    println("Initial w: " + w)
-
+    val startTime = System.currentTimeMillis
     for (i <- 1 to ITERATIONS) {
       println("On iteration " + i)
       val gradient = points.map { p =>
@@ -88,8 +118,50 @@ object SparkLR {
       }.reduce(_ + _)
       w -= gradient
     }
+    val duration = System.currentTimeMillis - startTime
+    println("Duration is " + duration / 1000.0 + " seconds")
+   // println("Final w: " + w.length)
+    //println("Final w: " + w)
+  }
 
-    println("Final w: " + w.length)
+  def testOptimized(points: RDD[DataPoint]): Unit = {
+    val cachedPoints = points.mapPartitions { iter =>
+      val chunk = new PointChunk(D)
+      val dos = new DataOutputStream(chunk)
+      for (point <- iter) {
+        point.x.foreach(dos.writeDouble)
+        dos.writeDouble(point.y)
+      }
+      Iterator(chunk)
+    }.cache()
+
+    val startTime = System.currentTimeMillis
+    for (i <- 1 to ITERATIONS) {
+      println("On iteration " + i)
+      val gradient= cachedPoints.mapPartitions{ iter =>
+        val chunk = iter.next()
+        chunk.getVectorValueIterator(w)
+      }.reduce(_+_)
+
+      w -= gradient
+    }
+    val duration = System.currentTimeMillis - startTime
+    println("Duration is " + duration / 1000.0 + " seconds")
+
+  }
+
+  def main(args: Array[String]) {
+
+    val sparkConf = new SparkConf().setAppName("SparkLR").setMaster("local")
+    val sc = new SparkContext(sparkConf)
+    val numSlices = if (args.length > 0) args(0).toInt else 2
+    val points = sc.parallelize(generateData, numSlices).cache()
+
+    //test the original version
+    //testNative(points)
+
+    //test the manual version
+    testOptimized(points)
 
     sc.stop()
   }
