@@ -109,7 +109,7 @@ object SparkLR {
   }
 
   def testNative(points: RDD[DataPoint]): Unit = {
-
+    points.cache()
     val startTime = System.currentTimeMillis
     for (i <- 1 to ITERATIONS) {
       println("On iteration " + i)
@@ -155,7 +155,7 @@ object SparkLR {
     val sparkConf = new SparkConf().setAppName("SparkLR").setMaster("local")
     val sc = new SparkContext(sparkConf)
     val numSlices = if (args.length > 0) args(0).toInt else 2
-    val points = sc.parallelize(generateData, numSlices).cache()
+    val points = sc.parallelize(generateData, numSlices)
 
     //test the original version
     //testNative(points)
